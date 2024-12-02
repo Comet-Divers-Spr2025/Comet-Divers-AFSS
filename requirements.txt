@@ -1,0 +1,8 @@
+astropy
+astroquery
+ipython
+ipykernel
+matplotlib
+nbformat
+poliastro
+scipy
