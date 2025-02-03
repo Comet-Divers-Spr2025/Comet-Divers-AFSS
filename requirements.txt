@@ -3,6 +3,9 @@ astroquery
 ipython
 ipykernel
 matplotlib
+# maturin
 nbformat
+pandas
 poliastro
+requests
 scipy
