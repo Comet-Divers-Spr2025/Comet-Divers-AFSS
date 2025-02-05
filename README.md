@@ -9,6 +9,8 @@ Sean McCurry, Nathan Kerns, Richard Huang, Owen Moran, Brendan Bullock
 
 Recommended python setup for consistent results.
 
+You must use Python 3.10.
+
 Run in a command line the top level directory of the repo:
 
 ```bash
