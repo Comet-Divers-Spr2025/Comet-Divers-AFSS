@@ -1,11 +1,11 @@
-astropy
-astroquery
+astropy==5.3.4
+astroquery==0.4.7
 ipython
 ipykernel
-matplotlib
+matplotlib==3.9.3
 # maturin
 nbformat
-pandas
-poliastro
+pandas==2.2.3
+poliastro==0.17.0
 requests
-scipy
+scipy==1.14.1
