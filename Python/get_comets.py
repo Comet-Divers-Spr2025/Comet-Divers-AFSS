@@ -39,7 +39,7 @@ def get_comets():
 
     params = {
         "sb-kind": "c",  # Comets only
-        "sb-class": "PAR,HYP",  # Hyperbolic and parabolic comets only
+        # "sb-class": "PAR,HYP",  # Hyperbolic and parabolic comets only
         "full-prec": "true",  # Full numerical precision
         "fields": ",".join(fields),
     }
@@ -56,6 +56,7 @@ def get_comets():
 
     df["q"] = df["q"].astype(pd.Float64Dtype())
     df["tp"] = df["tp"].astype(pd.Float64Dtype())
+    df["e"] = df["e"].astype(pd.Float64Dtype())
 
     return df
 
@@ -64,6 +65,9 @@ def filter_comets(df: pd.DataFrame) -> pd.DataFrame:
     # Filter to 0.5-1.5 AU
     df = df[df["q"] > 0.5]
     df = df[df["q"] < 1.5]
+
+    # Filter to >0.95 ecc
+    df = df[df["e"] > 0.95]
 
     # Filter to comets with perihelion after 1970
     df = df[df["tp"] > 2440605.5]
@@ -74,5 +78,7 @@ def filter_comets(df: pd.DataFrame) -> pd.DataFrame:
 if __name__ == "__main__":
     df = get_comets()
     df = filter_comets(df)
+
+    print(f"Got {len(df)} comets")
 
     df.to_csv("comets.csv", index=False)
