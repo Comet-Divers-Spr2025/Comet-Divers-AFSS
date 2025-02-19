@@ -339,7 +339,7 @@ def analyze_orbit(origin: str, name: str, epoch: Time, elements: dict = None):
     p.print_results()
 
 
-def jwst_sweep_work_func(offset: float, origin: str, elements: dict):
+def jwst_sweep_work_func(epoch: Time, offset: float, origin: str, elements: dict):
     # print(f"Start {offset}")
     # Intercept is always within 20 days of perihelion
     p = Porkchop(
@@ -380,7 +380,7 @@ def jwst_comet_sweep(
 
     with multiprocessing.Pool(PROCESSES, initializer=pool_init, initargs=(l,)) as pool:
         work_func = functools.partial(
-            jwst_sweep_work_func, origin=origin, elements=elements
+            jwst_sweep_work_func, epoch=epoch, origin=origin, elements=elements
         )
 
         for p in pool.map(work_func, offsets):
