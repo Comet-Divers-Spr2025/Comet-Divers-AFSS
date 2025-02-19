@@ -1,7 +1,9 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import time
+import multiprocessing
+import functools
+from diskcache import Cache
 
 import astropy.units as u
 from astropy.time import Time
@@ -15,8 +17,11 @@ import fh_c3
 from lambert import lambert
 
 
+# Configure cache directory
+cache = Cache(".cache")
+
 # Maximum number of epochs per request
-JPL_MAX_SIZE = 30
+JPL_MAX_SIZE = 25
 
 
 def obj_type(obj: str):
@@ -35,6 +40,7 @@ def obj_type(obj: str):
 
 
 # Get earth R and V
+@cache.memoize()
 def earth_states(times: Time):
     r = list()
     v = list()
@@ -51,20 +57,31 @@ def earth_states(times: Time):
     return r, v
 
 
+@cache.memoize()
 def get_states_horizon(name: str, times: Time):
     r = list()
     v = list()
 
     for i in range(0, len(times), JPL_MAX_SIZE):
-        # print(i)
         queried_times = times[i : i + JPL_MAX_SIZE]
 
+        # Lock is currently not working, but would allow multiprocessing on
+        # first run by only allowing once process to query Horizons at a given time.
+
+        # try:
+        #     lock.acquire()
+        # except NameError:
+        #     pass
         ephem = Ephem.from_horizons(
             name=name,
             epochs=queried_times,
             attractor=Sun,
             plane=Planes.EARTH_ECLIPTIC,
         )
+        # try:
+        #     lock.release()
+        # except NameError:
+        #     pass
         r1, v1 = ephem.rv()
         r.extend(r1)
         v.extend(v1)
@@ -152,7 +169,9 @@ class Porkchop:
                 np.linspace(start.jd, end.jd, count), format="jd", scale="tdb"
             )
 
-            orbit = Orbit.from_classical(Sun, **self.elements, epoch=epoch)
+            orbit = Orbit.from_classical(
+                Sun, **self.elements, epoch=self.t_peri, plane=Planes.EARTH_ECLIPTIC
+            )
 
             states = [orbit.propagate(t) for t in ts_arrive]
             rs_target = u.Quantity([s.r for s in states])
@@ -305,19 +324,124 @@ def analyze_lagrange_points():
         plt.savefig(f"output/earth-L{L}.png")
 
 
-def analyze_comet(origin: str, name: str, epoch: Time, elements: dict = None):
+def analyze_orbit(origin: str, name: str, epoch: Time, elements: dict = None):
     p = Porkchop(
         origin,
         name,
         epoch,
         elements=elements,
-        search_days=75,
+        search_days=50,
         search_resolution=1,
         max_tof=500,
     )
     p.process()
     p.graph(f"output/{origin}-{name.replace('/', '')}.png")
     p.print_results()
+
+
+def jwst_sweep_work_func(offset: float, origin: str, elements: dict):
+    # print(f"Start {offset}")
+    # Intercept is always within 20 days of perihelion
+    p = Porkchop(
+        origin,
+        "REF",
+        epoch + offset * u.day,
+        search_resolution=0.5,
+        search_days=25,
+        max_tof=500,
+        elements=elements,
+    )
+    p.process()
+    print(f"Done {offset}")
+
+    return p
+
+
+# Initialize lock in each subprocess
+def pool_init(l):
+    global lock
+    lock = l
+
+
+def jwst_comet_sweep(
+    epoch: Time, origin: str = "JWST", elements: dict = None, points: int = 24
+):
+    v_depart = []
+    v_arr = []
+    tofs = []
+    t_arr_peri = []
+
+    offsets = np.linspace(0, 365, points + 1)
+
+    l = multiprocessing.Lock()
+
+    # Only safe to use multiple processes once ephemerides are cached (ie, not on first run)
+    PROCESSES = 1
+
+    with multiprocessing.Pool(PROCESSES, initializer=pool_init, initargs=(l,)) as pool:
+        work_func = functools.partial(
+            jwst_sweep_work_func, origin=origin, elements=elements
+        )
+
+        for p in pool.map(work_func, offsets):
+            best_idx = np.nanargmin(p.v_launch)
+            best_idx = np.unravel_index(best_idx, p.v_launch.shape)
+
+            v_depart.append(p.v_launch[best_idx].to_value(u.km / u.s))
+            v_arr.append(p.v_arrive[best_idx].to_value(u.km / u.s))
+            tofs.append(p.tofs[best_idx[1]].to_value(u.day))
+            t_arr_peri.append((p.ts_arrive[best_idx[0]] - p.t_peri).to_value(u.day))
+
+    plt.figure(dpi=300)
+    plt.grid()
+    plt.title("Orbit Phase")
+
+    plt.plot(offsets, v_depart, color="tab:blue")
+    plt.xlabel("Offset (days)")
+    plt.ylabel("Departure Velocity (km/s)", color="tab:blue")
+    plt.tick_params(axis="y", labelcolor="tab:blue")
+
+    plt.twinx()
+    plt.plot(offsets, tofs, color="tab:red")
+    plt.ylabel("Time of Flight (days)", color="tab:red")
+    plt.tick_params(axis="y", labelcolor="tab:red")
+
+    plt.tight_layout()
+    plt.savefig("jwst_phase.png")
+    plt.close()
+
+    plt.scatter(offsets, t_arr_peri)
+    plt.savefig("jwst_arrival_peri.png")
+    plt.close()
+
+    best_idx = np.nanargmin(v_depart)
+    worst_idx = np.nanargmax(v_depart)
+
+    print(
+        f"Best: v_depart = {v_depart[best_idx]:0.2f} km/s, v_arr = {v_arr[best_idx]:0.2f} km/s"
+    )
+    print(
+        f"Worst: v_depart = {v_depart[worst_idx]:0.2f} km/s, v_arr = {v_arr[worst_idx]:0.2f} km/s"
+    )
+    print(
+        f"Average: v_depart = {np.mean(v_depart):0.2f} km/s, v_arr = {np.mean(v_arr):0.2f} km/s"
+    )
+
+
+def compute_node_crossing(elements: dict):
+    f = 2 * np.pi - elements["argp"].to_value(u.rad)
+    e = elements["ecc"].to_value(u.one)
+
+    if f < np.pi:
+        E = np.arccos((e + np.cos(f)) / (e * np.cos(f) + 1))
+    else:
+        E = 2 * np.pi - np.arccos((e + np.cos(f)) / (e * np.cos(f) + 1))
+
+    M = E - e * np.sin(E)
+
+    n = np.sqrt(Sun.k / elements["a"] ** 3)
+
+    print(f"Node crossing at Tp + {(M / n).to(u.day):0.2f}")
 
 
 if __name__ == "__main__":
@@ -336,7 +460,11 @@ if __name__ == "__main__":
     # data that far in the future
     epoch = Time("2025-06-15T12:00:00", format="isot", scale="utc")
 
-    analyze_comet("Earth", "JWST", epoch)
-    analyze_comet("Earth", "REF", epoch, elements)
-    analyze_comet("L2", "REF", epoch, elements)
-    analyze_comet("JWST", "REF", epoch, elements)
+    jwst_comet_sweep(epoch, elements=elements)
+
+    compute_node_crossing(elements)
+
+    # analyze_orbit("Earth", "JWST", epoch)
+    # analyze_orbit("Earth", "REF", epoch, elements)
+    # analyze_orbit("L2", "REF", epoch, elements)
+    # analyze_orbit("JWST", "REF", epoch, elements)
