@@ -319,24 +319,58 @@ def analyze_comet(origin: str, name: str, epoch: Time, elements: dict = None):
     p.graph(f"output/{origin}-{name.replace('/', '')}.png")
     p.print_results()
 
+    # Add departure velocity output
+    best_idx = np.nanargmin(p.c3)
+    best_idx = np.unravel_index(best_idx, p.c3.shape)
+    return p.ts_arrive[best_idx[0]].iso, p.tofs[best_idx[1]].to_value(u.d), p.v_arrive[best_idx].to_value(u.km/u.s), p.v_launch[best_idx].to_value(u.km/u.s)
+
 
 if __name__ == "__main__":
-    # analyze_lagrange_points()
+    # # analyze_lagrange_points()
 
-    elements = {
-        "a": 10474.06 * u.au,  # Semi-major axis
-        "ecc": 0.9998956528860143 * u.one,  # Eccentricity
-        "inc": 100.88290133343503 * u.deg,  # Inclination
-        "raan": 232.4318366430011 * u.deg,  # Right ascension of ascending node
-        "argp": 335.5337773673682 * u.deg,  # Argument of periapsis
-        "nu": 0 * u.deg,  # True anomaly, 0 because epoch at perihelion
-    }
+    # elements = {
+    #     "a": 10474.06 * u.au,  # Semi-major axis
+    #     "ecc": 0.9998956528860143 * u.one,  # Eccentricity
+    #     "inc": 100.88290133343503 * u.deg,  # Inclination
+    #     "raan": 232.4318366430011 * u.deg,  # Right ascension of ascending node
+    #     "argp": 335.5337773673682 * u.deg,  # Argument of periapsis
+    #     "nu": 0 * u.deg,  # True anomaly, 0 because epoch at perihelion
+    # }
 
-    # Using an earlier time than the given data because horizons doesn't have
-    # data that far in the future
-    epoch = Time("2025-06-15T12:00:00", format="isot", scale="utc")
+    # # Using an earlier time than the given data because horizons doesn't have
+    # # data that far in the future
+    # epoch = Time("2025-06-15T12:00:00", format="isot", scale="utc")
 
-    analyze_comet("Earth", "JWST", epoch)
-    analyze_comet("Earth", "REF", epoch, elements)
-    analyze_comet("L2", "REF", epoch, elements)
-    analyze_comet("JWST", "REF", epoch, elements)
+    # analyze_comet("Earth", "JWST", epoch)
+    # analyze_comet("Earth", "REF", epoch, elements)
+    # analyze_comet("L2", "REF", epoch, elements)
+    # analyze_comet("JWST", "REF", epoch, elements)
+
+    df_filt1 = pd.read_csv('Python\comets_filt1.csv')
+
+    df_filt2 = pd.DataFrame(columns=list(df_filt1.columns) + ['best_arr_time', 'tof', 'arr_vel', 'dep_vel'])
+
+    for index, row in df_filt1.iterrows():
+        elements = {
+            "a": row['a'] * u.au,  # Semi-major axis
+            "ecc": row['e'] * u.one,  # Eccentricity
+            "inc": row['i'] * u.deg,  # Inclination
+            "raan": row['om'] * u.deg,  # Right ascension of ascending node
+            "argp": row['w'] * u.deg,  # Argument of periapsis
+            "nu": 0 * u.deg,  # True anomaly, 0 because epoch at perihelion
+        }
+
+        epoch = Time(row['epoch'], format="jd")
+
+        arr_time, tof, arr_vel, dep_vel = analyze_comet("L2", "REF", epoch, elements)
+        if dep_vel <= 2:
+            new_row = row.copy()
+            new_row['best_arr_time'] = arr_time
+            new_row['tof'] = tof
+            new_row['arr_vel'] = arr_vel
+            new_row['dep_vel'] = dep_vel
+
+        # Append the new row to the output DataFrame
+        df_filt2 = pd.concat([df_filt2, new_row.to_frame().T], ignore_index=True)
+    
+    df_filt2.to_csv("comets_filt2.csv", index=False)
