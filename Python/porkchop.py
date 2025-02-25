@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 import numpy as np
 import time
 import multiprocessing
@@ -12,6 +13,7 @@ from poliastro.bodies import Sun, Earth
 from poliastro.frames import Planes
 from poliastro.ephem import Ephem
 from poliastro.twobody import Orbit
+from poliastro.plotting import StaticOrbitPlotter
 
 import fh_c3
 from lambert import lambert
@@ -22,6 +24,15 @@ cache = Cache(".cache")
 
 # Maximum number of epochs per request
 JPL_MAX_SIZE = 25
+
+
+def vector_angle_deg(v1, v2):
+    v1 = v1 / np.linalg.norm(v1)
+    v2 = v2 / np.linalg.norm(v2)
+    dot = np.dot(v1, v2)
+    angle = np.arccos(dot)
+
+    return np.rad2deg(angle)
 
 
 def obj_type(obj: str):
@@ -54,7 +65,7 @@ def earth_states(times: Time):
         r.extend(r1)
         v.extend(v1)
 
-    return r, v
+    return u.Quantity(r), u.Quantity(v)
 
 
 @cache.memoize()
@@ -83,8 +94,14 @@ def get_states_horizon(name: str, times: Time):
         # except NameError:
         #     pass
         r1, v1 = ephem.rv()
-        r.extend(r1)
-        v.extend(v1)
+
+        # Reverse output if necessary, since horizons returns results in order
+        if queried_times[0].mjd > queried_times[-1].mjd:
+            r.extend(r1[::-1])
+            v.extend(v1[::-1])
+        else:
+            r.extend(r1)
+            v.extend(v1)
 
     return u.Quantity(r), u.Quantity(v)
 
@@ -105,6 +122,7 @@ class Porkchop:
         origin: str,
         target: str,
         t_peri: Time,
+        node_crossing: Time = None,
         search_days: int = 200,
         search_resolution: int = 5,
         min_tof: float = 100,
@@ -116,6 +134,7 @@ class Porkchop:
         self.origin = origin
         self.target = target
         self.t_peri = t_peri
+        self.node_crossing = node_crossing
         self.search_days = search_days
         self.search_resolution = search_resolution
         self.min_tof = min_tof
@@ -124,10 +143,17 @@ class Porkchop:
         self.elements = elements
 
     def process(self) -> dict:
-        start = self.t_peri - self.search_days * u.day
-        end = self.t_peri + self.search_days * u.day
+        if self.node_crossing:
+            start = self.node_crossing - self.search_days * u.day
+            end = self.node_crossing + self.search_days * u.day
+        else:
+            start = self.t_peri - self.search_days * u.day
+            end = self.t_peri + self.search_days * u.day
 
-        tofs = np.linspace(self.min_tof, self.max_tof, self.tof_count) * u.day
+        tofs = (
+            np.linspace(self.min_tof, self.max_tof, self.tof_count, endpoint=False)
+            * u.day
+        )
 
         # Get target states
         if obj_type(self.target) == "comet":
@@ -182,6 +208,8 @@ class Porkchop:
         v_launch = np.zeros((len(ts_arrive), len(tofs))) * (u.km / u.s)
         v_arrive = np.zeros((len(ts_arrive), len(tofs))) * (u.km / u.s)
 
+        initial_states = np.zeros((len(ts_arrive), len(tofs), 6))
+
         # Loop through arrival times
         for i, t_arrive in enumerate(ts_arrive):
             # Get origin states
@@ -217,9 +245,17 @@ class Porkchop:
                 if v_inf_origin_1 > v_inf_origin_2:
                     v_launch[i, j] = v_inf_origin_2
                     v_arrive[i, j] = v_inf_target_2
+
+                    initial_states[i, j] = np.concatenate(
+                        [rs_origin[j].to_value(u.km), v_i_2.to_value(u.km / u.s)]
+                    )
                 else:
                     v_launch[i, j] = v_inf_origin_1
                     v_arrive[i, j] = v_inf_target_1
+
+                    initial_states[i, j] = np.concatenate(
+                        [rs_origin[j].to_value(u.km), v_i_1.to_value(u.km / u.s)]
+                    )
 
         self.v_launch: u.Quantity = v_launch
         self.v_arrive: u.Quantity = v_arrive
@@ -227,6 +263,8 @@ class Porkchop:
         self.ts_arrive = ts_arrive
 
         self.c3: u.Quantity = self.v_launch**2
+
+        self.initial_states = initial_states
 
         return self.v_launch, self.v_arrive, self.c3
 
@@ -286,6 +324,49 @@ class Porkchop:
         print()
 
 
+def plot_orbit(
+    t_arr: Time,
+    comet_orbit: Orbit,
+    sc_orbit: Orbit,
+    filename: str,
+    title: str = None,
+    earth_plane: bool = True,
+):
+    comet_orbit = comet_orbit.propagate(t_arr)
+    sc_orbit = sc_orbit.propagate(t_arr)
+
+    _, ax = plt.subplots(figsize=(4, 9), dpi=150)
+
+    plotter = StaticOrbitPlotter(ax, plane=Planes.EARTH_ECLIPTIC)
+
+    if earth_plane:
+        plotter.plot_body_orbit(Earth, t_arr, color="g", trail=True)
+
+        plotter._num_points = 10000
+        plotter.plot(comet_orbit, label="Comet", color="b", trail=False)
+        plotter._num_points = 150
+
+        plotter.plot(sc_orbit, label="Spacecraft", color="r", trail=True)
+    else:
+        plotter._num_points = 10000
+        plotter.plot(comet_orbit, label="Comet", color="b", trail=False)
+        plotter._num_points = 150
+
+        plotter.plot_body_orbit(Earth, t_arr, color="g", trail=True)
+        plotter.plot(sc_orbit, label="Spacecraft", color="r", trail=True)
+
+    bound = (1.25 * u.AU).to_value(u.km)
+    plt.xlim([-1.2 * bound, 1.2 * bound])
+    plt.ylim([-bound, bound])
+
+    if title:
+        plt.title(title)
+
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"{filename}_orbits.png")
+
+
 def analyze_lagrange_points():
     for L in [1, 2, 4, 5]:
         p = Porkchop(
@@ -324,35 +405,48 @@ def analyze_lagrange_points():
         plt.savefig(f"output/earth-L{L}.png")
 
 
-def analyze_orbit(origin: str, name: str, epoch: Time, elements: dict = None):
+def analyze_orbit(
+    origin: str, name: str, epoch: Time, elements: dict = None, tof_count: int = 400
+):
     p = Porkchop(
         origin,
         name,
         epoch,
         elements=elements,
-        search_days=50,
-        search_resolution=1,
+        node_crossing=epoch + 20.6 * u.day,
+        search_days=5,
+        search_resolution=5,
         max_tof=500,
+        tof_count=tof_count,
     )
     p.process()
     p.graph(f"output/{origin}-{name.replace('/', '')}.png")
     p.print_results()
 
 
-def jwst_sweep_work_func(epoch: Time, offset: float, origin: str, elements: dict):
-    # print(f"Start {offset}")
+def jwst_sweep_work_func(longitude: float, epoch: Time, origin: str, elements: dict):
+    start = time.monotonic()
+
+    elements["raan"] = longitude * u.deg
+    node_crossing = epoch + compute_node_crossing(elements)
+
     # Intercept is always within 20 days of perihelion
     p = Porkchop(
         origin,
         "REF",
-        epoch + offset * u.day,
-        search_resolution=0.5,
-        search_days=25,
-        max_tof=500,
+        epoch,
+        node_crossing=node_crossing,
+        search_resolution=0.1,
+        search_days=2,
+        min_tof=0.25 * 365,
+        max_tof=2 * 365,
+        tof_count=200,
         elements=elements,
     )
     p.process()
-    print(f"Done {offset}")
+    end = time.monotonic()
+
+    print(f"Longitude {longitude:0.2f} took {end-start:0.2f}s")
 
     return p
 
@@ -364,68 +458,213 @@ def pool_init(l):
 
 
 def jwst_comet_sweep(
-    epoch: Time, origin: str = "JWST", elements: dict = None, points: int = 24
+    epoch: Time,
+    origin: str = "JWST",
+    elements: dict = None,
+    points: int = 90,
+    base_name: str = "ref",
 ):
     v_depart = []
     v_arr = []
     tofs = []
+    t_arr = []
     t_arr_peri = []
+    earth_sc = []
+    sun_sc = []
+    sun_phase_angle = []
 
-    offsets = np.linspace(0, 365, points + 1)
+    comet_orbits = []
+    sc_orbits = []
+
+    longitudes = np.linspace(0, 360, points, endpoint=False)
 
     l = multiprocessing.Lock()
 
-    # Only safe to use multiple processes once ephemerides are cached (ie, not on first run)
-    PROCESSES = 1
+    # Only safe to use multiple processes once ephemerides are cached (ie, not
+    # on first run with given settings)
+    PROCESSES = 4
 
     with multiprocessing.Pool(PROCESSES, initializer=pool_init, initargs=(l,)) as pool:
         work_func = functools.partial(
             jwst_sweep_work_func, epoch=epoch, origin=origin, elements=elements
         )
 
-        for p in pool.map(work_func, offsets):
+        for i, p in enumerate(pool.map(work_func, longitudes)):
+            # Find best solution based on dV to leave L2
             best_idx = np.nanargmin(p.v_launch)
             best_idx = np.unravel_index(best_idx, p.v_launch.shape)
+            best_time = p.ts_arrive[best_idx[0]]
+            best_tof = p.tofs[best_idx[1]]
 
+            # Record all relevent parameters
             v_depart.append(p.v_launch[best_idx].to_value(u.km / u.s))
             v_arr.append(p.v_arrive[best_idx].to_value(u.km / u.s))
-            tofs.append(p.tofs[best_idx[1]].to_value(u.day))
-            t_arr_peri.append((p.ts_arrive[best_idx[0]] - p.t_peri).to_value(u.day))
+            tofs.append(best_tof.to_value(u.day))
+            t_arr.append(best_time)
+            t_arr_peri.append((best_time - p.t_peri).to_value(u.day))
 
+            # Get position of earth at flyby
+            earth_r, _ = earth_states(Time([best_time] * 2))
+            earth_r = earth_r[0]
+
+            elements["raan"] = longitudes[i] * u.deg
+
+            # Get position of comet
+            comet_orbit = Orbit.from_classical(
+                Sun,
+                **elements,
+                epoch=epoch,
+                plane=Planes.EARTH_ECLIPTIC,
+            )
+
+            # Get position of spacecraft
+            sc_state = p.initial_states[best_idx]
+            sc_orbit = Orbit.from_vectors(
+                Sun,
+                sc_state[:3] * u.km,
+                sc_state[3:] * u.km / u.s,
+                best_time - best_tof,
+                Planes.EARTH_ECLIPTIC,
+            )
+
+            # Use position 24h before flyby to compute phase angle
+            minus_day = best_time - 1 * u.day
+            comet_r = u.Quantity(comet_orbit.propagate(minus_day).r)
+            sc_approach = u.Quantity(sc_orbit.propagate(minus_day).r)
+
+            sun_phase_angle.append(
+                vector_angle_deg(-comet_r, sc_approach - comet_r).to_value(u.deg)
+            )
+
+            # Compute Earth-SC and Sun-SC distances
+            earth_sc.append(np.linalg.norm(sc_approach - earth_r).to_value(u.au))
+            sun_sc.append(np.linalg.norm(comet_r).to_value(u.au))
+
+            comet_orbits.append(comet_orbit)
+            sc_orbits.append(sc_orbit)
+
+    # Graph dV and ToF vs longitude
     plt.figure(dpi=300)
     plt.grid()
     plt.title("Orbit Phase")
 
-    plt.plot(offsets, v_depart, color="tab:blue")
-    plt.xlabel("Offset (days)")
+    plt.plot(longitudes, v_depart, color="tab:blue")
+    plt.xlabel("Longitude of Ascending Node (deg)")
     plt.ylabel("Departure Velocity (km/s)", color="tab:blue")
     plt.tick_params(axis="y", labelcolor="tab:blue")
 
     plt.twinx()
-    plt.plot(offsets, tofs, color="tab:red")
+    plt.plot(longitudes, tofs, color="tab:red")
     plt.ylabel("Time of Flight (days)", color="tab:red")
     plt.tick_params(axis="y", labelcolor="tab:red")
 
     plt.tight_layout()
-    plt.savefig("jwst_phase.png")
+    plt.savefig(f"{base_name}_phase.png")
     plt.close()
 
-    plt.scatter(offsets, t_arr_peri)
-    plt.savefig("jwst_arrival_peri.png")
+    # Graph arrival time vs longitude
+    plt.figure(dpi=300)
+    plt.plot(longitudes, t_arr_peri)
+    plt.savefig(f"{base_name}_arrival_peri.png")
     plt.close()
+
+    # Graph distance vs longitude
+    plt.figure(dpi=300)
+    plt.title("Distance at Comet Flyby")
+    plt.plot(longitudes, earth_sc, label="Earth-SC")
+    plt.plot(longitudes, sun_sc, label="Sun-SC")
+    plt.legend()
+    plt.xlabel("Longitude of Ascending Node (deg)")
+    plt.ylabel("Distance (AU)")
+    plt.grid()
+
+    plt.tight_layout()
+    plt.savefig(f"{base_name}_distance.png")
+    plt.close()
+
+    # Graph sun phase angle vs longitude
+    plt.figure(dpi=300)
+    plt.plot(longitudes, sun_phase_angle)
+    plt.title("Sun-Comet-S/C Phase Angle, 1 Day Before Flyby")
+    plt.xlabel("Longitude of Ascending Node (deg)")
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f"{base_name}_phase_angle.png")
+
+    # Graph percent of achievable phasings vs dv
+
+    prop_mass_fraction = 0.6
+    isp = 303
+    dv = isp * 9.81 * np.log(1 / (1 - prop_mass_fraction)) / 1e3
+
+    dv_sorted = np.sort(v_depart)
+    closest_idx = np.argmin(np.abs(dv_sorted - dv))
+
+    plt.figure(dpi=300)
+    plt.plot(np.linspace(0, 100, len(dv_sorted)), dv_sorted)
+    plt.title("Percent of Phasings Reachable vs Delta V")
+    plt.xlabel("Percent Reachable")
+    plt.ylabel("Delta V (km/s)")
+    plt.axhline(dv, color="r", linestyle="--")
+    plt.gca().xaxis.set_major_formatter(mtick.PercentFormatter())
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f"{base_name}_percent_reachable.png")
 
     best_idx = np.nanargmin(v_depart)
     worst_idx = np.nanargmax(v_depart)
 
-    print(
-        f"Best: v_depart = {v_depart[best_idx]:0.2f} km/s, v_arr = {v_arr[best_idx]:0.2f} km/s"
+    # Graph orbits
+    plot_orbit(
+        t_arr[best_idx],
+        comet_orbits[best_idx],
+        sc_orbits[best_idx],
+        base_name + "_best",
+        "Best Trajectory - Earth View",
+        earth_plane=True,
     )
-    print(
-        f"Worst: v_depart = {v_depart[worst_idx]:0.2f} km/s, v_arr = {v_arr[worst_idx]:0.2f} km/s"
+    plot_orbit(
+        t_arr[best_idx],
+        comet_orbits[best_idx],
+        sc_orbits[best_idx],
+        base_name + "_best_comet",
+        "Best Trajectory - Comet View",
+        earth_plane=False,
     )
-    print(
-        f"Average: v_depart = {np.mean(v_depart):0.2f} km/s, v_arr = {np.mean(v_arr):0.2f} km/s"
+    plot_orbit(
+        t_arr[worst_idx],
+        comet_orbits[worst_idx],
+        sc_orbits[worst_idx],
+        base_name + "_worst",
+        "Worst Trajectory",
     )
+
+    # Print everything
+
+    print("\nBest:")
+    print(f"\tv_depart = {v_depart[best_idx]:0.2f} km/s")
+    print(f"\tv_arr = {v_arr[best_idx]:0.2f} km/s")
+    print(f"\tr_earth_sc = {earth_sc[best_idx]:0.3f} AU")
+    print(f"\tr_sun_sc = {sun_sc[best_idx]:0.3f} AU")
+    print(f"\tphase angle = {sun_phase_angle[best_idx]:0.1f} deg")
+
+    print(f"\nAverage:")
+    print(f"\tv_depart = {np.mean(v_depart):0.2f} km/s")
+    print(f"\tv_arr = {np.mean(v_arr):0.2f} km/s")
+    print(f"\tr_earth_sc = {np.mean(earth_sc):0.3f} AU")
+    print(f"\tr_sun_sc = {np.mean(sun_sc):0.3f} AU")
+    print(f"\tphase angle = {np.mean(sun_phase_angle):0.1f} deg")
+
+    print("\nWorst:")
+    print(f"\tv_depart = {v_depart[worst_idx]:0.2f} km/s")
+    print(f"\tv_arr = {v_arr[worst_idx]:0.2f} km/s")
+    print(f"\tr_earth_sc = {earth_sc[worst_idx]:0.3f} AU")
+    print(f"\tr_sun_sc = {sun_sc[worst_idx]:0.3f} AU")
+    print(f"\tphase angle = {sun_phase_angle[worst_idx]:0.1f} deg")
+
+    print(f"\nCan reach {closest_idx/len(v_depart):.1%} with {dv:0.2f} km/s")
+
+    print()
 
 
 def compute_node_crossing(elements: dict):
@@ -441,7 +680,7 @@ def compute_node_crossing(elements: dict):
 
     n = np.sqrt(Sun.k / elements["a"] ** 3)
 
-    print(f"Node crossing at Tp + {(M / n).to(u.day):0.2f}")
+    return (M / n).to(u.day)
 
 
 if __name__ == "__main__":
@@ -457,12 +696,10 @@ if __name__ == "__main__":
     }
 
     # Using an earlier time than the given data because horizons doesn't have
-    # data that far in the future
-    epoch = Time("2025-06-15T12:00:00", format="isot", scale="utc")
+    # data that far in the future for JWST
+    epoch = Time("2025-06-15T12:00:00", format="isot", scale="tdb")
 
     jwst_comet_sweep(epoch, elements=elements)
-
-    compute_node_crossing(elements)
 
     # analyze_orbit("Earth", "JWST", epoch)
     # analyze_orbit("Earth", "REF", epoch, elements)
