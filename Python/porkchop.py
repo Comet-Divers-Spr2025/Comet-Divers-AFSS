@@ -5,6 +5,7 @@ import time
 
 import astropy.units as u
 from astropy.time import Time
+from astropy.constants import GM_sun
 from astroquery.jplhorizons import Horizons
 from poliastro.bodies import Sun, Earth
 from poliastro.frames import Planes
@@ -216,7 +217,7 @@ class Porkchop:
         v_inf = self.v_arrive.to_value(u.km / u.s)
 
         c3[c3 > 200] = np.nan
-        v_inf[v_inf > 60] = np.nan
+        v_inf[v_inf > 80] = np.nan  # upped from 60 to 80 to reduce NaNs
         t = self.ts_arrive.to_datetime()
 
         plt.figure(figsize=(6, 6), dpi=300)
@@ -346,9 +347,11 @@ if __name__ == "__main__":
     # analyze_comet("L2", "REF", epoch, elements)
     # analyze_comet("JWST", "REF", epoch, elements)
 
+
+
     df_filt1 = pd.read_csv('Python\comets_filt1.csv')
 
-    df_filt2 = pd.DataFrame(columns=list(df_filt1.columns) + ['best_arr_time', 'tof', 'arr_vel', 'dep_vel'])
+    df_filt2 = pd.DataFrame(columns=list(df_filt1.columns) + ['best_arr_time', 'tof', 'arr_vel', 'dep_vel', 'period'])
 
     for index, row in df_filt1.iterrows():
         elements = {
@@ -363,14 +366,37 @@ if __name__ == "__main__":
         epoch = Time(row['epoch'], format="jd")
 
         arr_time, tof, arr_vel, dep_vel = analyze_comet("L2", "REF", epoch, elements)
-        if dep_vel <= 2:
+
+        a_km = elements['a'].to_value(u.km)
+        if a_km > 0:
+            period = 2*np.pi*np.sqrt(a_km**3 / GM_sun.to_value(u.km**3 / u.s**2)) / 31556952  # converted seconds to years
+        else:
+            period = np.nan
+
+        if dep_vel <= 2.724:  # req propellant mass fraction < 0.6
             new_row = row.copy()
             new_row['best_arr_time'] = arr_time
             new_row['tof'] = tof
             new_row['arr_vel'] = arr_vel
             new_row['dep_vel'] = dep_vel
+            if period > 200 or np.isnan(period):
+                new_row['period'] = period
+                df_filt2 = pd.concat([df_filt2, new_row.to_frame().T], ignore_index=True)
+                print(f"Period: {period} years")
+            else:
+                print(f"Period < 200 years, not non-periodic. Period: {period} years")
 
-        # Append the new row to the output DataFrame
-        df_filt2 = pd.concat([df_filt2, new_row.to_frame().T], ignore_index=True)
-    
-    df_filt2.to_csv("comets_filt2.csv", index=False)
+    df_filt2.to_csv("Python\comets_filt2.csv", index=False)
+
+
+
+    # elements = {
+    #     "a": 10474.06 * u.au,  # Semi-major axis
+    #     "ecc": 0.9998956528860143 * u.one,  # Eccentricity
+    #     "inc": 100.88290133343503 * u.deg,  # Inclination
+    #     "raan": 232.4318366430011 * u.deg,  # Right ascension of ascending node
+    #     "argp": 335.5337773673682 * u.deg,  # Argument of periapsis
+    #     "nu": 0 * u.deg,  # True anomaly, 0 because epoch at perihelion
+    # }
+    # epoch = Time("2033-06-15T12:00:00", format="isot", scale="utc")
+    # analyze_comet("L2", "REF", epoch, elements)
