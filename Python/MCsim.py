@@ -2,7 +2,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-import scipy.solve_ivp as solve_ivp
+import scipy
 
 #region Function Definitions
 
