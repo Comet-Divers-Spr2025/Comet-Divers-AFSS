@@ -11,7 +11,6 @@ class SimConfig:
     ## Mission parameters
     start_dist: u.Quantity["length", 1]
     start_vel: u.Quantity["velocity", 1]
-    tcm_count: int
     tcm_times: list[u.Quantity["time"]]  # Time after start of sim
     comet_radius: float
 
@@ -28,6 +27,7 @@ class SimConfig:
 
     # Maneuver
     cov_dv: u.Quantity
+    thrust_scale: float
 
     ## Simulation parameters
     run_count: int
@@ -54,7 +54,11 @@ def normal_sample(cov: u.Quantity):
 
 
 def B_plane_targeting(r, v, comet):
-    dv = np.array([0, 0, 0])  # insert B-plane targeting algorithm here
+    r_comet = comet - r
+    r_hat = r_comet / np.linalg.norm(r_comet)
+    new_v = r_hat * np.linalg.norm(v)
+
+    dv = new_v - v
 
     return dv
 
@@ -71,6 +75,7 @@ def MonteCarloSample(config: SimConfig):
     comet = [0, 0, 0] * u.m
 
     trajectory = []
+    dv_total = 0 * u.m / u.s
     t = 0 * u.s
 
     r = u.Quantity([config.start_dist, 0 * u.km, 0 * u.km]).si
@@ -89,9 +94,9 @@ def MonteCarloSample(config: SimConfig):
     trajectory.append([r.copy(), v.copy()])
 
     # Execute TCMs
-    for i in range(config.tcm_count):
+    for tcm_time in config.tcm_times:
         # Propagate to next TCM
-        dt = config.tcm_times[i] - t
+        dt = tcm_time - t
         t += dt
         r, v = linear_propagation(r, v, dt)
         r += normal_sample(cov_r_rel)
@@ -99,7 +104,10 @@ def MonteCarloSample(config: SimConfig):
 
         # Run targeting algorithm and execute maneuver
         dv = B_plane_targeting(r, v, comet)
-        v += dv + normal_sample(cov_dv)
+        dv *= np.random.normal(1, config.thrust_scale)
+        dv += normal_sample(cov_dv)
+        dv_total += np.linalg.norm(dv)
+        v += dv
 
         trajectory.append([r.copy(), v.copy()])
 
@@ -114,7 +122,43 @@ def MonteCarloSample(config: SimConfig):
 
     # print(f"Closest approach distance: {d_closest.to(u.km)}, {t_closest.to(u.hour)}")
 
-    return trajectory, d_closest
+    return trajectory, d_closest, dv_total
+
+
+def run_batch(config: SimConfig):
+    distances = []
+    trajectories = []
+    dvs = []
+
+    # Execute Monte Carlo Simulation
+    for _ in range(config.run_count):
+        traj, dist, dv = MonteCarloSample(config)
+        distances.append(dist)
+        trajectories.append(traj)
+        dvs.append(dv)
+
+    distances = u.Quantity(distances)
+    impact_points = [traj[-1][0] for traj in trajectories]
+    dvs = u.Quantity(dvs)
+
+    return distances, impact_points, dvs
+
+
+def graph_2d(config: SimConfig, impact_points: list, filename: str):
+    impact_y = [p[1].to_value(u.km) for p in impact_points]
+    impact_z = [p[2].to_value(u.km) for p in impact_points]
+
+    plt.figure(figsize=(8, 8), dpi=200)
+    plt.gca().add_patch(
+        plt.Circle((0, 0), config.comet_radius.to_value(u.km), color="gray")
+    )
+    plt.scatter(impact_y, impact_z, s=1)
+    plt.gca().set_aspect("equal")
+    plt.gca().set_adjustable("datalim")
+    plt.xlabel("Y (km)")
+    plt.ylabel("Z (km)")
+    plt.tight_layout()
+    plt.savefig(filename)
 
 
 # endregion
@@ -122,7 +166,7 @@ def MonteCarloSample(config: SimConfig):
 # region Main
 
 
-def main():
+def test_no_error():
     start_time = 24 * u.hour
     start_vel = 50 * u.km / u.s
     start_dist = start_vel * start_time
@@ -130,27 +174,80 @@ def main():
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
-        tcm_count=3,
-        tcm_times=[12, 18, 23] * u.hour,
+        tcm_times=[12] * u.hour,
         comet_radius=5 * u.km,
-        cov_pos_abs=([1e3, 1e3, 1e3] * u.km) ** 2,  # guess
-        cov_vel_abs=([10, 10, 10] * u.m / u.s) ** 2,  # guess
+        cov_pos_abs=([0, 0, 0] * u.km) ** 2,  # guess
+        cov_vel_abs=([0, 0, 0] * u.m / u.s) ** 2,  # guess
         cov_pos_rel=([0, 0, 0] * u.m) ** 2,  # guess
         cov_vel_rel=([0, 0, 0] * u.m / u.s) ** 2,  # guess
-        cov_dv=([0.1, 0.1, 0.1] * u.m / u.s) ** 2,  # guess
-        run_count=10000,
+        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,  # guess
+        run_count=1000,
     )
 
-    distances = []
-    trajectories = []
+    distances, impact_points = run_batch(config)
 
-    # Execute Monte Carlo Simulation
-    for _ in range(config.run_count):
-        traj, dist = MonteCarloSample(config)
-        distances.append(dist)
-        trajectories.append(traj)
+    graph_2d(config, impact_points, "mc_output/test_no_error.png")
 
-    distances = u.Quantity(distances)
+    # Should hit center every time
+    assert np.max(distances) < 0.1 * u.km
+
+
+def test_initial_error():
+    start_time = 24 * u.hour
+    start_vel = 50 * u.km / u.s
+    start_dist = start_vel * start_time
+
+    config = SimConfig(
+        start_dist=start_dist,
+        start_vel=start_vel,
+        tcm_times=[12] * u.hour,
+        comet_radius=5 * u.km,
+        cov_pos_abs=([1, 1, 1] * u.km) ** 2,  # guess
+        cov_vel_abs=([1, 1, 1] * u.m / u.s) ** 2,  # guess
+        cov_pos_rel=([0, 0, 0] * u.m) ** 2,  # guess
+        cov_vel_rel=([0, 0, 0] * u.m / u.s) ** 2,  # guess
+        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,  # guess
+        run_count=1000,
+    )
+
+    distances, impact_points = run_batch(config)
+
+    graph_2d(config, impact_points, "mc_output/test_initial_error.png")
+
+    hit_rate = np.sum(distances < config.comet_radius) / len(distances)
+
+    # Should almost never hit
+    assert hit_rate < 0.01
+
+
+def main():
+    start_time = 30 * u.day
+    start_vel = 50 * u.km / u.s
+    start_dist = start_vel * start_time
+
+    # dV error: impulse bit / sc mass
+    # MR-111G: 0.076 Ns
+    # Mass: 100 kg
+    # 7.6e-4 m/s
+    # 2.5% thrust scale range based on ISP
+
+    config = SimConfig(
+        start_dist=start_dist,
+        start_vel=start_vel,
+        tcm_times=start_time - [15*24, 5*24, 12, 6, 1] * u.hour,
+        comet_radius=5 * u.km,
+        cov_pos_abs=([1, 1, 1] * u.m) ** 2,  # guess
+        cov_vel_abs=([0.1, 0.1, 0.1] * u.m / u.s) ** 2,  # guess
+        cov_pos_rel=([1e3, 1e3, 1e3] * u.m) ** 2,  # guess
+        cov_vel_rel=([10, 10, 10] * u.m / u.s) ** 2,  # guess
+        cov_dv=(7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,  # guess
+        thrust_scale=0.025,
+        run_count=1000,
+    )
+
+    distances, impact_points, dvs = run_batch(config)
+
+    print(np.mean(dvs), np.max(dvs))
 
     # Plot Results
     # 2D impact point cloud plot
@@ -158,19 +255,7 @@ def main():
     # histogram of successful impacts, including 3-sigma bounds
 
     # 2D plot
-    impact_points = [traj[-1][0][1:] for traj in trajectories]
-    impact_y = [p[0].to_value(u.km) for p in impact_points]
-    impact_z = [p[1].to_value(u.km) for p in impact_points]
-
-    plt.figure(figsize=(8, 8), dpi=500)
-    plt.scatter(impact_y, impact_z, s=1)
-    plt.gca().add_patch(
-        plt.Circle((0, 0), config.comet_radius.to_value(u.km), color="r")
-    )
-    plt.gca().set_aspect("equal")
-    plt.gca().set_adjustable("datalim")
-    plt.tight_layout()
-    plt.savefig("mcsim_2d.png")
+    graph_2d(config, impact_points, "mc_output/sim_2d.png")
 
     # Report Statistics
     # mean and standard deviation of impact point
@@ -187,4 +272,6 @@ def main():
 # endregion
 
 if __name__ == "__main__":
+    # test_no_error()
+    # test_initial_error()
     main()
