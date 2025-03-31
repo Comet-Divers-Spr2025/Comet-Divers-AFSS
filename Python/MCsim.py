@@ -20,17 +20,17 @@ class SimConfig:
     cov_pos_abs: u.Quantity
     cov_vel_abs: u.Quantity
 
-    # Relative position from optical navigation, used for terminal guidance
-    # TODO: make these proportional to distance from target
-    cov_pos_rel: u.Quantity
-    cov_vel_rel: u.Quantity
-
     # Maneuver
     cov_dv: u.Quantity
     thrust_scale: float
 
+    # Relative position from optical navigation, used for terminal guidance
+    focal_length: u.Quantity["length"] = 1000 * u.mm
+    pixel_pitch: u.Quantity["length"] = 10 * u.um
+    pixel_accuracy: float = 0.05
+
     ## Simulation parameters
-    run_count: int
+    run_count: int = 1
 
 
 # region Functions
@@ -63,12 +63,28 @@ def B_plane_targeting(r, v, comet):
     return dv
 
 
+# Find point along trajectory closest to comet
 def time_to_impact(r, v, comet):
     v_hat = v / np.linalg.norm(v)
     d_to_approach = np.linalg.norm(np.dot(comet - r, v_hat))
     dt = d_to_approach / np.linalg.norm(v)
 
     return dt
+
+
+def calc_opnav_error(config: SimConfig, r: u.Quantity):
+    pixel_resolution = np.linalg.norm(r) * config.pixel_pitch / config.focal_length
+    opnav_error = (config.pixel_accuracy * pixel_resolution).si
+
+    # print(f"Radius in pixels: {(config.comet_radius / pixel_resolution).si}")
+
+    error_vec = [
+        0,
+        np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
+        np.random.normal(0, opnav_error.to_value(opnav_error.unit))
+    ] * opnav_error.unit
+
+    return error_vec
 
 
 def MonteCarloSample(config: SimConfig):
@@ -83,8 +99,6 @@ def MonteCarloSample(config: SimConfig):
 
     cov_r_abs = np.diag(config.cov_pos_abs)
     cov_v_abs = np.diag(config.cov_vel_abs)
-    cov_r_rel = np.diag(config.cov_pos_rel)
-    cov_v_rel = np.diag(config.cov_vel_rel)
     cov_dv = np.diag(config.cov_dv)
 
     # Initial position uncertainty
@@ -99,8 +113,9 @@ def MonteCarloSample(config: SimConfig):
         dt = tcm_time - t
         t += dt
         r, v = linear_propagation(r, v, dt)
-        r += normal_sample(cov_r_rel)
-        v += normal_sample(cov_v_rel)
+
+        # Optical navigation
+        r += calc_opnav_error(config, r)
 
         # Run targeting algorithm and execute maneuver
         dv = B_plane_targeting(r, v, comet)
@@ -174,22 +189,21 @@ def test_no_error():
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
-        tcm_times=[12] * u.hour,
+        tcm_times=[] * u.hour,
         comet_radius=5 * u.km,
-        cov_pos_abs=([0, 0, 0] * u.km) ** 2,  # guess
-        cov_vel_abs=([0, 0, 0] * u.m / u.s) ** 2,  # guess
-        cov_pos_rel=([0, 0, 0] * u.m) ** 2,  # guess
-        cov_vel_rel=([0, 0, 0] * u.m / u.s) ** 2,  # guess
-        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,  # guess
+        cov_pos_abs=([0, 0, 0] * u.km) ** 2,
+        cov_vel_abs=([0, 0, 0] * u.m / u.s) ** 2,
+        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,
+        thrust_scale=0,
         run_count=1000,
     )
 
-    distances, impact_points = run_batch(config)
-
+    distances, impact_points, dvs = run_batch(config)
     graph_2d(config, impact_points, "mc_output/test_no_error.png")
 
-    # Should hit center every time
+    # Should hit center every time with 0 dv
     assert np.max(distances) < 0.1 * u.km
+    assert np.sum(dvs) < 0.01 * u.m / u.s
 
 
 def test_initial_error():
@@ -200,28 +214,77 @@ def test_initial_error():
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
-        tcm_times=[12] * u.hour,
+        tcm_times=[] * u.hour,
         comet_radius=5 * u.km,
-        cov_pos_abs=([1, 1, 1] * u.km) ** 2,  # guess
-        cov_vel_abs=([1, 1, 1] * u.m / u.s) ** 2,  # guess
-        cov_pos_rel=([0, 0, 0] * u.m) ** 2,  # guess
-        cov_vel_rel=([0, 0, 0] * u.m / u.s) ** 2,  # guess
-        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,  # guess
+        cov_pos_abs=([10, 10, 10] * u.km) ** 2,
+        cov_vel_abs=([10, 10, 10] * u.m / u.s) ** 2,
+        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,
+        thrust_scale=0,
         run_count=1000,
     )
 
-    distances, impact_points = run_batch(config)
-
+    distances, impact_points, dvs = run_batch(config)
     graph_2d(config, impact_points, "mc_output/test_initial_error.png")
 
     hit_rate = np.sum(distances < config.comet_radius) / len(distances)
 
     # Should almost never hit
     assert hit_rate < 0.01
+    assert np.sum(dvs) < 0.01 * u.m / u.s
+
+
+def test_single_maneuver():
+    start_time = 24 * u.hour
+    start_vel = 50 * u.km / u.s
+    start_dist = start_vel * start_time
+
+    config = SimConfig(
+        start_dist=start_dist,
+        start_vel=start_vel,
+        tcm_times=[12] * u.hour,
+        comet_radius=5 * u.km,
+        cov_pos_abs=([10, 10, 10] * u.km) ** 2,
+        cov_vel_abs=([10, 10, 10] * u.m / u.s) ** 2,
+        cov_dv=([0, 0, 0] * u.m / u.s) ** 2,
+        thrust_scale=0,
+        run_count=1000,
+    )
+
+    distances, impact_points, dvs = run_batch(config)
+    graph_2d(config, impact_points, "mc_output/test_single_maneuver.png")
+
+    # Should hit every time
+    assert np.max(distances) < 0.1 * u.km
+    assert np.max(dvs) < 100 * u.m / u.s
+
+
+def test_thruster_error():
+    start_time = 24 * u.hour
+    start_vel = 50 * u.km / u.s
+    start_dist = start_vel * start_time
+
+    config = SimConfig(
+        start_dist=start_dist,
+        start_vel=start_vel,
+        tcm_times=[12] * u.hour,
+        comet_radius=5 * u.km,
+        cov_pos_abs=([10, 10, 10] * u.km) ** 2,
+        cov_vel_abs=([10, 10, 10] * u.m / u.s) ** 2,
+        cov_dv=([1, 1, 1] * u.mm / u.s) ** 2,
+        thrust_scale=0.025,
+        run_count=1000,
+    )
+
+    distances, impact_points, dvs = run_batch(config)
+    graph_2d(config, impact_points, "mc_output/test_thruster_error.png")
+
+    hit_rate = np.sum(distances < config.comet_radius) / len(distances)
+
+    assert hit_rate < 0.3, hit_rate
 
 
 def main():
-    start_time = 30 * u.day
+    start_time = 1 * u.day
     start_vel = 50 * u.km / u.s
     start_dist = start_vel * start_time
 
@@ -234,13 +297,11 @@ def main():
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
-        tcm_times=start_time - [15*24, 5*24, 12, 6, 1] * u.hour,
+        tcm_times=start_time - [12, 6, 1] * u.hour,
         comet_radius=5 * u.km,
-        cov_pos_abs=([1, 1, 1] * u.m) ** 2,  # guess
-        cov_vel_abs=([0.1, 0.1, 0.1] * u.m / u.s) ** 2,  # guess
-        cov_pos_rel=([1e3, 1e3, 1e3] * u.m) ** 2,  # guess
-        cov_vel_rel=([10, 10, 10] * u.m / u.s) ** 2,  # guess
-        cov_dv=(7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,  # guess
+        cov_pos_abs=([100e3, 100e3, 100e3] * u.m) ** 2,
+        cov_vel_abs=([2, 2, 2] * u.m / u.s) ** 2,
+        cov_dv=(7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
         thrust_scale=0.025,
         run_count=1000,
     )
@@ -274,4 +335,7 @@ def main():
 if __name__ == "__main__":
     # test_no_error()
     # test_initial_error()
+    # test_single_maneuver()
+    # test_thruster_error()
+
     main()
