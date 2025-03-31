@@ -2,8 +2,11 @@
 
 import astropy.units as u
 import dataclasses
-import numpy as np
+import itertools
 import matplotlib.pyplot as plt
+import multiprocessing
+import numpy as np
+import time
 
 
 @dataclasses.dataclass
@@ -25,8 +28,7 @@ class SimConfig:
     thrust_scale: float
 
     # Relative position from optical navigation, used for terminal guidance
-    focal_length: u.Quantity["length"] = 1000 * u.mm
-    pixel_pitch: u.Quantity["length"] = 10 * u.um
+    pixel_rads: float
     pixel_accuracy: float = 0.05
 
     ## Simulation parameters
@@ -73,7 +75,7 @@ def time_to_impact(r, v, comet):
 
 
 def calc_opnav_error(config: SimConfig, r: u.Quantity):
-    pixel_resolution = np.linalg.norm(r) * config.pixel_pitch / config.focal_length
+    pixel_resolution = np.linalg.norm(r) * config.pixel_rads
     opnav_error = (config.pixel_accuracy * pixel_resolution).si
 
     # print(f"Radius in pixels: {(config.comet_radius / pixel_resolution).si}")
@@ -81,8 +83,10 @@ def calc_opnav_error(config: SimConfig, r: u.Quantity):
     error_vec = [
         0,
         np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
-        np.random.normal(0, opnav_error.to_value(opnav_error.unit))
+        np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
     ] * opnav_error.unit
+
+    error_vec[0] = np.linalg.norm(r) * np.random.normal(0, 0.001)
 
     return error_vec
 
@@ -96,6 +100,8 @@ def MonteCarloSample(config: SimConfig):
 
     r = u.Quantity([config.start_dist, 0 * u.km, 0 * u.km]).si
     v = u.Quantity([-config.start_vel, 0 * u.km / u.s, 0 * u.km / u.s]).si
+
+    r_est_last = r.copy()
 
     cov_r_abs = np.diag(config.cov_pos_abs)
     cov_v_abs = np.diag(config.cov_vel_abs)
@@ -114,15 +120,16 @@ def MonteCarloSample(config: SimConfig):
         t += dt
         r, v = linear_propagation(r, v, dt)
 
-        # Optical navigation
-        r += calc_opnav_error(config, r)
-
         # Run targeting algorithm and execute maneuver
-        dv = B_plane_targeting(r, v, comet)
+        r_est = r + calc_opnav_error(config, r)
+        v_est = (r_est - r_est_last) / dt
+        dv = B_plane_targeting(r_est, v_est, comet)
         dv *= np.random.normal(1, config.thrust_scale)
         dv += normal_sample(cov_dv)
         dv_total += np.linalg.norm(dv)
         v += dv
+
+        r_est_last = r_est
 
         trajectory.append([r.copy(), v.copy()])
 
@@ -146,11 +153,16 @@ def run_batch(config: SimConfig):
     dvs = []
 
     # Execute Monte Carlo Simulation
-    for _ in range(config.run_count):
-        traj, dist, dv = MonteCarloSample(config)
-        distances.append(dist)
-        trajectories.append(traj)
-        dvs.append(dv)
+
+    with multiprocessing.Pool(processes=8) as pool:
+        results = pool.imap_unordered(
+            MonteCarloSample, itertools.repeat(config, config.run_count), chunksize=50
+        )
+
+        for res in results:
+            trajectories.append(res[0])
+            distances.append(res[1])
+            dvs.append(res[2])
 
     distances = u.Quantity(distances)
     impact_points = [traj[-1][0] for traj in trajectories]
@@ -297,18 +309,21 @@ def main():
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
-        tcm_times=start_time - [12, 6, 1] * u.hour,
-        comet_radius=5 * u.km,
+        tcm_times=start_time - [12, 6, 1, 1 / 3] * u.hour,
+        comet_radius=0.69 / 2 * u.km,
         cov_pos_abs=([100e3, 100e3, 100e3] * u.m) ** 2,
         cov_vel_abs=([2, 2, 2] * u.m / u.s) ** 2,
         cov_dv=(7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
         thrust_scale=0.025,
-        run_count=1000,
+        pixel_rads=(6.5 * u.um) / (2600 * u.mm),
+        run_count=10000,
     )
 
+    start = time.time()
     distances, impact_points, dvs = run_batch(config)
+    end = time.time()
 
-    print(np.mean(dvs), np.max(dvs))
+    print(f"Sim took {end-start:0.3f}s")
 
     # Plot Results
     # 2D impact point cloud plot
@@ -323,8 +338,11 @@ def main():
     # information regarding % of success
     # others
 
-    print(f"Mean closest distance: {np.mean(distances):0.1f}")
-    print(f"Min distance: {np.min(distances):0.1f}")
+    print(f"Average delta V: {np.mean(dvs):0.2f}")
+    print(f"3 sigma delta V: {np.percentile(dvs, 99.7):0.2f}")
+
+    print(f"Average impact diameter: {np.mean(distances):0.1f}")
+    print(f"3 sigma impact diameter: {2 * np.percentile(distances, 99.7):0.1f}")
     print(
         f"Impact percent: {np.sum(distances < config.comet_radius)/len(distances):.2%}"
     )
