@@ -14,6 +14,7 @@ class SimConfig:
     ## Mission parameters
     start_dist: u.Quantity["length", 1]
     start_vel: u.Quantity["velocity", 1]
+    start_separation: u.Quantity["length", 1]
     tcm_times: list[u.Quantity["time"]]  # Time after start of sim
     comet_radius: float
 
@@ -80,13 +81,17 @@ def calc_opnav_error(config: SimConfig, r: u.Quantity):
 
     # print(f"Radius in pixels: {(config.comet_radius / pixel_resolution).si}")
 
+    parallax_angle = (config.start_separation / config.start_dist)
+    current_sep = config.start_separation * np.linalg.norm(r) / config.start_dist
+    range_error = (config.pixel_rads * config.pixel_accuracy) * current_sep / parallax_angle**2
+
     error_vec = [
         0,
         np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
         np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
     ] * opnav_error.unit
 
-    error_vec[0] = np.linalg.norm(r) * np.random.normal(0, 0.001)
+    error_vec[0] = np.random.normal(0, range_error.to_value(range_error.unit)) * range_error.unit
 
     return error_vec
 
@@ -306,16 +311,20 @@ def main():
     # 7.6e-4 m/s
     # 2.5% thrust scale range based on ISP
 
+    pixel_rads = (6 * u.um) / (3000 * u.mm)
+    print(f"Pixel resolution (rad): {pixel_rads.si}")
+
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
+        start_separation=(0.5 * u.m / u.s) * (1 * u.day),
         tcm_times=start_time - [12, 6, 1, 1 / 3] * u.hour,
         comet_radius=0.69 / 2 * u.km,
         cov_pos_abs=([100e3, 100e3, 100e3] * u.m) ** 2,
         cov_vel_abs=([2, 2, 2] * u.m / u.s) ** 2,
-        cov_dv=(7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
+        cov_dv=(2 * 7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
         thrust_scale=0.025,
-        pixel_rads=(6.5 * u.um) / (2600 * u.mm),
+        pixel_rads=pixel_rads,
         run_count=10000,
     )
 
