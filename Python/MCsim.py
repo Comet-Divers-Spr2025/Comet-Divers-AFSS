@@ -77,7 +77,7 @@ def time_to_impact(r, v, comet):
 
 def calc_opnav_error(config: SimConfig, r: u.Quantity):
     pixel_resolution = np.linalg.norm(r) * config.pixel_rads
-    opnav_error = (config.pixel_accuracy * pixel_resolution).si
+    opnav_error = config.pixel_accuracy * pixel_resolution
 
     # print(f"Radius in pixels: {(config.comet_radius / pixel_resolution).si}")
 
@@ -152,19 +152,26 @@ def MonteCarloSample(config: SimConfig):
     return trajectory, d_closest, dv_total
 
 
-def run_batch(config: SimConfig):
+def run_batch(config: SimConfig, parallel: bool = True):
     distances = []
     trajectories = []
     dvs = []
 
     # Execute Monte Carlo Simulation
 
-    with multiprocessing.Pool(processes=8) as pool:
-        results = pool.imap_unordered(
-            MonteCarloSample, itertools.repeat(config, config.run_count), chunksize=50
-        )
+    if parallel:
+        with multiprocessing.Pool(processes=8) as pool:
+            results = pool.imap_unordered(
+                MonteCarloSample, itertools.repeat(config, config.run_count), chunksize=50
+            )
 
-        for res in results:
+            for res in results:
+                trajectories.append(res[0])
+                distances.append(res[1])
+                dvs.append(res[2])
+    else:
+        for _ in range(config.run_count):
+            res = MonteCarloSample(config)
             trajectories.append(res[0])
             distances.append(res[1])
             dvs.append(res[2])
@@ -311,13 +318,13 @@ def main():
     # 7.6e-4 m/s
     # 2.5% thrust scale range based on ISP
 
-    pixel_rads = (6 * u.um) / (3000 * u.mm)
+    pixel_rads = (6 * u.um) / (500 * u.mm)
     print(f"Pixel resolution (rad): {pixel_rads.si}")
 
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
-        start_separation=(0.5 * u.m / u.s) * (1 * u.day),
+        start_separation=(1 * u.m / u.s) * (4 * u.day),
         tcm_times=start_time - [12, 6, 1, 1 / 3] * u.hour,
         comet_radius=0.69 / 2 * u.km,
         cov_pos_abs=([100e3, 100e3, 100e3] * u.m) ** 2,
@@ -325,11 +332,11 @@ def main():
         cov_dv=(2 * 7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
         thrust_scale=0.025,
         pixel_rads=pixel_rads,
-        run_count=10000,
+        run_count=100000,
     )
 
     start = time.time()
-    distances, impact_points, dvs = run_batch(config)
+    distances, impact_points, dvs = run_batch(config, True)
     end = time.time()
 
     print(f"Sim took {end-start:0.3f}s")
