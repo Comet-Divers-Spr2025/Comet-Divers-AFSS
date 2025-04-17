@@ -30,7 +30,8 @@ class SimConfig:
 
     # Relative position from optical navigation, used for terminal guidance
     pixel_rads: float
-    pixel_accuracy: float = 0.05
+    pixel_error_unresolved: float = 0.1
+    pixel_error_resolved: float = 0.5
 
     ## Simulation parameters
     run_count: int = 1
@@ -77,21 +78,32 @@ def time_to_impact(r, v, comet):
 
 def calc_opnav_error(config: SimConfig, r: u.Quantity):
     pixel_resolution = np.linalg.norm(r) * config.pixel_rads
-    opnav_error = config.pixel_accuracy * pixel_resolution
+
+    # Different accuracy for point source vs resolved shape
+    if pixel_resolution < 5 * 2 * config.comet_radius:
+        pixel_accuracy = config.pixel_error_resolved
+    else:
+        pixel_accuracy = config.pixel_error_unresolved
+
+    opnav_error = pixel_accuracy * pixel_resolution
 
     # print(f"Radius in pixels: {(config.comet_radius / pixel_resolution).si}")
 
-    parallax_angle = (config.start_separation / config.start_dist)
-    current_sep = config.start_separation * np.linalg.norm(r) / config.start_dist
-    range_error = (config.pixel_rads * config.pixel_accuracy) * current_sep / parallax_angle**2
-
+    # Cross range error from direct sensor measurement
     error_vec = [
         0,
         np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
         np.random.normal(0, opnav_error.to_value(opnav_error.unit)),
     ] * opnav_error.unit
 
-    error_vec[0] = np.random.normal(0, range_error.to_value(range_error.unit)) * range_error.unit
+    # In range error from parallax measurement
+    parallax_angle = config.start_separation / config.start_dist
+    current_sep = config.start_separation * np.linalg.norm(r) / config.start_dist
+    range_error = (config.pixel_rads * pixel_accuracy) * current_sep / parallax_angle**2
+
+    error_vec[0] = (
+        np.random.normal(0, range_error.to_value(range_error.unit)) * range_error.unit
+    )
 
     return error_vec
 
@@ -162,7 +174,9 @@ def run_batch(config: SimConfig, parallel: bool = True):
     if parallel:
         with multiprocessing.Pool(processes=8) as pool:
             results = pool.imap_unordered(
-                MonteCarloSample, itertools.repeat(config, config.run_count), chunksize=50
+                MonteCarloSample,
+                itertools.repeat(config, config.run_count),
+                chunksize=50,
             )
 
             for res in results:
@@ -309,7 +323,7 @@ def test_thruster_error():
 
 def main():
     start_time = 1 * u.day
-    start_vel = 50 * u.km / u.s
+    start_vel = 65 * u.km / u.s
     start_dist = start_vel * start_time
 
     # dV error: impulse bit / sc mass
@@ -317,26 +331,26 @@ def main():
     # Mass: 100 kg
     # 7.6e-4 m/s
     # 2.5% thrust scale range based on ISP
+    # 2 thruster per direction
 
-    pixel_rads = (6 * u.um) / (500 * u.mm)
-    print(f"Pixel resolution (rad): {pixel_rads.si}")
+    pixel_rads = (6.5 * u.um) / (2628.326 * u.mm)
 
     config = SimConfig(
         start_dist=start_dist,
         start_vel=start_vel,
         start_separation=(1 * u.m / u.s) * (4 * u.day),
-        tcm_times=start_time - [12, 6, 1, 1 / 3] * u.hour,
+        tcm_times=start_time - [12, 6, 1, 20 / 60, 5 / 60] * u.hour,
         comet_radius=0.69 / 2 * u.km,
         cov_pos_abs=([100e3, 100e3, 100e3] * u.m) ** 2,
         cov_vel_abs=([2, 2, 2] * u.m / u.s) ** 2,
         cov_dv=(2 * 7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
         thrust_scale=0.025,
         pixel_rads=pixel_rads,
-        run_count=100000,
+        run_count=100_000,
     )
 
     start = time.time()
-    distances, impact_points, dvs = run_batch(config, True)
+    distances, impact_points, dvs = run_batch(config)
     end = time.time()
 
     print(f"Sim took {end-start:0.3f}s")
