@@ -35,6 +35,7 @@ class SimConfig:
 
     ## Simulation parameters
     run_count: int = 1
+    target: u.Quantity = [0, 0, 0] * u.m
 
 
 # region Functions
@@ -109,7 +110,7 @@ def calc_opnav_error(config: SimConfig, r: u.Quantity):
 
 
 def MonteCarloSample(config: SimConfig):
-    comet = [0, 0, 0] * u.m
+    comet = config.target
 
     trajectory = []
     dv_total = 0 * u.m / u.s
@@ -155,7 +156,7 @@ def MonteCarloSample(config: SimConfig):
     dt = time_to_impact(r, v, comet)
     t_closest = t + dt
     r, v = linear_propagation(r, v, dt)
-    d_closest = np.linalg.norm(r - comet)
+    d_closest = np.linalg.norm(r)
 
     trajectory.append([r.copy(), v.copy()])
 
@@ -210,6 +211,28 @@ def graph_2d(config: SimConfig, impact_points: list, filename: str):
     plt.gca().set_adjustable("datalim")
     plt.xlabel("Y (km)")
     plt.ylabel("Z (km)")
+    plt.title(f"Impact Points, N={config.run_count:,}")
+    plt.tight_layout()
+    plt.savefig(filename)
+
+
+def graph_histogram(config: SimConfig, distances: list, filename: str):
+    min_dist = np.min(distances)
+
+    if min_dist > 10 * u.km:
+        distances = distances.to_value(u.km)
+        unit = u.km
+    else:
+        distances = distances.to_value(u.m)
+        unit = u.m
+
+    plt.figure(figsize=(8, 6), dpi=300)
+    plt.hist(distances, bins=100)
+
+    if min_dist < config.comet_radius:
+        plt.axvline(x=config.comet_radius.to_value(unit), c="gray", ls=":")
+
+    plt.xlabel(f"Distance ({unit})")
     plt.tight_layout()
     plt.savefig(filename)
 
@@ -321,10 +344,12 @@ def test_thruster_error():
     assert hit_rate < 0.3, hit_rate
 
 
-def main():
+def common_config(final: bool = True) -> SimConfig:
     start_time = 1 * u.day
     start_vel = 65 * u.km / u.s
     start_dist = start_vel * start_time
+
+    runs = 100_000 if final else 1_000
 
     # dV error: impulse bit / sc mass
     # MR-111G: 0.076 Ns
@@ -332,8 +357,6 @@ def main():
     # 7.6e-4 m/s
     # 2.5% thrust scale range based on ISP
     # 2 thruster per direction
-
-    pixel_rads = (6.5 * u.um) / (2628.326 * u.mm)
 
     config = SimConfig(
         start_dist=start_dist,
@@ -345,9 +368,15 @@ def main():
         cov_vel_abs=([2, 2, 2] * u.m / u.s) ** 2,
         cov_dv=(2 * 7.6e-4 * ([1.0, 1.0, 1.0] * u.m / u.s)) ** 2,
         thrust_scale=0.025,
-        pixel_rads=pixel_rads,
-        run_count=100_000,
+        pixel_rads=(6.5 * u.um) / (2628.326 * u.mm),
+        run_count=runs,
     )
+
+    return config
+
+
+def impact():
+    config = common_config(final=True)
 
     start = time.time()
     distances, impact_points, dvs = run_batch(config)
@@ -360,14 +389,11 @@ def main():
     # 3D trajectory impact plot, with comet shape plotted, and impact point highlighted
     # histogram of successful impacts, including 3-sigma bounds
 
-    # 2D plot
-    graph_2d(config, impact_points, "mc_output/sim_2d.png")
+    # Graphs
+    graph_2d(config, impact_points, "mc_output/impact.png")
+    graph_histogram(config, distances, "mc_output/impact_hist.png")
 
     # Report Statistics
-    # mean and standard deviation of impact point
-    # information regarding % of success
-    # others
-
     print(f"Average delta V: {np.mean(dvs):0.2f}")
     print(f"3 sigma delta V: {np.percentile(dvs, 99.7):0.2f}")
 
@@ -378,6 +404,28 @@ def main():
     )
 
 
+def flyby():
+    config = common_config(final=True)
+    config.target = [0, 500, 0] * u.km
+    config.tcm_times = 1 * u.day - [12, 6] * u.hour
+
+    start = time.time()
+    distances, impact_points, dvs = run_batch(config)
+    end = time.time()
+
+    print(f"Sim took {end-start:0.3f}s")
+
+    graph_2d(config, impact_points, "mc_output/flyby.png")
+    graph_histogram(config, distances, "mc_output/flyby_hist.png")
+
+    # Statistics
+    print(f"Average delta V: {np.mean(dvs):0.2f}")
+    print(f"3 sigma delta V: {np.percentile(dvs, 99.7):0.2f}")
+
+    print(f"Mean flyby distance: {np.mean(distances).to(u.km):0.1f}")
+    print(f"3 sigma flyby distance: {np.percentile(distances, 0.3).to(u.km):0.1f}, {np.percentile(distances, 99.7).to(u.km):0.1f}")
+
+
 # endregion
 
 if __name__ == "__main__":
@@ -386,4 +434,5 @@ if __name__ == "__main__":
     # test_single_maneuver()
     # test_thruster_error()
 
-    main()
+    impact()
+    flyby()

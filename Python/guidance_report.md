@@ -2,10 +2,10 @@
     * 65 km/s
     * Simulation starts 1 day from comet
     * Comet diameter: 0.69km
-    * 1 m/s * 4 day initial separation of spacecraft, all converge on comet
+    * Minimum 1 m/s * 4 day = ~350km initial separation of spacecraft - larger separation is fine, we just need at least this much to get adequate parallax measurements
     * Maneuvers at I-12h, 6h, 1h, 20min, 5min
 * Errors:
-    * Initial state: 100km, 2m/s per axis
+    * Initial state error: 100km, 2m/s per axis
     * Maneuver bias: Impulse bit of chosen thruster (2x 7.6e-4 m/s)
     * Maneuver scale: 2.5%
 * Camera specs (DRACO):
@@ -22,4 +22,5 @@
     * impact diameter mean (3 sigma): 64 (410) m
 * Other results:
     * Detectable at 1-1.5 days out with highest gain, 1s exposure time, worst case comet conditions (size, sun distance, phase angle)
-    * With 800km flyby, 1.98m/px resolution, 1011px for 2km comet, 349px for 0.69km
+
+    * With 500km flyby, 1.24m/px resolution, 1617px for 2km comet, 558px for 0.69km
