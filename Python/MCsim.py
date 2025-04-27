@@ -110,6 +110,11 @@ def calc_opnav_error(config: SimConfig, r: u.Quantity):
 
 
 def MonteCarloSample(config: SimConfig):
+    # Make sure random numbers are actually random
+    np.random.seed(
+        int(time.time() * 1e9) * id(multiprocessing.current_process()) % 2**32
+    )
+
     comet = config.target
 
     trajectory = []
@@ -199,25 +204,48 @@ def run_batch(config: SimConfig, parallel: bool = True):
 
 
 def graph_2d(config: SimConfig, impact_points: list, filename: str):
-    impact_y = [p[1].to_value(u.km) for p in impact_points]
-    impact_z = [p[2].to_value(u.km) for p in impact_points]
+    impact_y = np.array([p[1].to_value(u.km) for p in impact_points])
+    impact_z = np.array([p[2].to_value(u.km) for p in impact_points])
 
-    plt.figure(figsize=(8, 8), dpi=200)
+    target_yz = config.target[1:].to_value(u.km)
+    distances = np.sqrt((impact_y - target_yz[0]) ** 2 + (impact_z - target_yz[1]) ** 2)
+
+    r_mean = np.mean(distances)
+    r_3sigma = np.percentile(distances, 99.7)
+
+    plt.figure(figsize=(6, 6), dpi=150)
     plt.gca().add_patch(
-        plt.Circle((0, 0), config.comet_radius.to_value(u.km), color="gray")
+        plt.Circle(
+            (0, 0), config.comet_radius.to_value(u.km), color="gray", label="Comet"
+        )
     )
-    plt.scatter(impact_y, impact_z, s=1)
+    plt.scatter(impact_y, impact_z, s=0.5)
+    plt.gca().add_patch(
+        plt.Circle(target_yz, r_mean, color="red", fill=False, ls="--", label="Mean")
+    )
+    plt.gca().add_patch(
+        plt.Circle(
+            target_yz, r_3sigma, color="red", fill=False, ls=":", label="3 Sigma"
+        )
+    )
     plt.gca().set_aspect("equal")
     plt.gca().set_adjustable("datalim")
+    plt.legend()
     plt.xlabel("Y (km)")
     plt.ylabel("Z (km)")
-    plt.title(f"Impact Points, N={config.run_count:,}")
+    plt.title(
+        f"Intercept Points, N={config.run_count:,}, D={2*config.comet_radius.to(u.m):.0f}"
+    )
     plt.tight_layout()
     plt.savefig(filename)
 
 
-def graph_histogram(config: SimConfig, distances: list, filename: str):
+def graph_histogram(config: SimConfig, distances: list, filename: str, title: str):
     min_dist = np.min(distances)
+
+    r_mean = np.mean(distances)
+    r_3sigma_upper = np.percentile(distances, 99.7)
+    r_3sigma_lower = np.percentile(distances, 0.3)
 
     if min_dist > 10 * u.km:
         distances = distances.to_value(u.km)
@@ -226,13 +254,38 @@ def graph_histogram(config: SimConfig, distances: list, filename: str):
         distances = distances.to_value(u.m)
         unit = u.m
 
-    plt.figure(figsize=(8, 6), dpi=300)
+    plt.figure(figsize=(6, 4), dpi=150)
     plt.hist(distances, bins=100)
 
     if min_dist < config.comet_radius:
-        plt.axvline(x=config.comet_radius.to_value(unit), c="gray", ls=":")
+        plt.axvline(
+            x=config.comet_radius.to_value(unit), c="red", ls="-", label="Comet Radius"
+        )
+        plt.axvline(
+            x=r_3sigma_upper.to_value(unit),
+            c="red",
+            ls=":",
+            label="3 Sigma Impact Distance",
+        )
+        plt.axvline(
+            x=r_mean.to_value(unit), c="red", ls="--", label="Mean Impact Distance"
+        )
+    else:
+        plt.axvline(
+            x=r_3sigma_upper.to_value(unit),
+            c="red",
+            ls=":",
+            label="3 Sigma Flyby Distance",
+        )
+        plt.axvline(x=r_3sigma_lower.to_value(unit), c="red", ls=":")
+        plt.axvline(
+            x=r_mean.to_value(unit), c="red", ls="--", label="Mean Flyby Distance"
+        )
 
-    plt.xlabel(f"Distance ({unit})")
+    plt.legend(loc="upper right")
+
+    plt.xlabel(f"Distance from center ({unit})")
+    plt.title(title)
     plt.tight_layout()
     plt.savefig(filename)
 
@@ -349,7 +402,7 @@ def common_config(final: bool = True) -> SimConfig:
     start_vel = 65 * u.km / u.s
     start_dist = start_vel * start_time
 
-    runs = 100_000 if final else 1_000
+    runs = 100_000 if final else 10_000
 
     # dV error: impulse bit / sc mass
     # MR-111G: 0.076 Ns
@@ -362,7 +415,7 @@ def common_config(final: bool = True) -> SimConfig:
         start_dist=start_dist,
         start_vel=start_vel,
         start_separation=(1 * u.m / u.s) * (4 * u.day),
-        tcm_times=start_time - [12, 6, 1, 20 / 60, 5 / 60] * u.hour,
+        tcm_times=start_time - [12, 6, 1, 5 / 60] * u.hour,
         comet_radius=0.69 / 2 * u.km,
         cov_pos_abs=([100e3, 100e3, 100e3] * u.m) ** 2,
         cov_vel_abs=([2, 2, 2] * u.m / u.s) ** 2,
@@ -375,8 +428,8 @@ def common_config(final: bool = True) -> SimConfig:
     return config
 
 
-def impact():
-    config = common_config(final=True)
+def impact(final):
+    config = common_config(final=final)
 
     start = time.time()
     distances, impact_points, dvs = run_batch(config)
@@ -391,7 +444,9 @@ def impact():
 
     # Graphs
     graph_2d(config, impact_points, "mc_output/impact.png")
-    graph_histogram(config, distances, "mc_output/impact_hist.png")
+    graph_histogram(
+        config, distances, "mc_output/impact_hist.png", "Impact Distance Histogram"
+    )
 
     # Report Statistics
     print(f"Average delta V: {np.mean(dvs):0.2f}")
@@ -402,11 +457,14 @@ def impact():
     print(
         f"Impact percent: {np.sum(distances < config.comet_radius)/len(distances):.2%}"
     )
+    print()
 
 
-def flyby():
-    config = common_config(final=True)
-    config.target = [0, 500, 0] * u.km
+def flyby(final):
+    FLYBY_DIST = 500  # km
+
+    config = common_config(final=final)
+    config.target = [0, FLYBY_DIST, 0] * u.km
     config.tcm_times = 1 * u.day - [12, 6] * u.hour
 
     start = time.time()
@@ -416,14 +474,18 @@ def flyby():
     print(f"Sim took {end-start:0.3f}s")
 
     graph_2d(config, impact_points, "mc_output/flyby.png")
-    graph_histogram(config, distances, "mc_output/flyby_hist.png")
+    graph_histogram(
+        config, distances, "mc_output/flyby_hist.png", "Flyby Distance Histogram"
+    )
 
     # Statistics
     print(f"Average delta V: {np.mean(dvs):0.2f}")
     print(f"3 sigma delta V: {np.percentile(dvs, 99.7):0.2f}")
 
     print(f"Mean flyby distance: {np.mean(distances).to(u.km):0.1f}")
-    print(f"3 sigma flyby distance: {np.percentile(distances, 0.3).to(u.km):0.1f}, {np.percentile(distances, 99.7).to(u.km):0.1f}")
+    print(
+        f"3 sigma flyby distance: {np.percentile(distances, 0.3).to(u.km):0.1f}, {np.percentile(distances, 99.7).to(u.km):0.1f}"
+    )
 
 
 # endregion
@@ -434,5 +496,7 @@ if __name__ == "__main__":
     # test_single_maneuver()
     # test_thruster_error()
 
-    impact()
-    flyby()
+    final = True
+
+    impact(final)
+    flyby(final)
