@@ -219,6 +219,8 @@ def graph_2d(config: SimConfig, impact_points: list, filename: str):
             (0, 0), config.comet_radius.to_value(u.km), color="gray", label="Comet"
         )
     )
+    if "flyby" in filename:
+        plt.annotate("Comet", xy=(0, 0), xytext=(0.3, 0.35), textcoords="figure fraction", arrowprops=dict(facecolor="k", shrink=0.1, width=2))
     plt.scatter(impact_y, impact_z, s=0.5)
     plt.gca().add_patch(
         plt.Circle(target_yz, r_mean, color="red", fill=False, ls="--", label="Mean")
