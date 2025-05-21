@@ -220,17 +220,17 @@ class Porkchop:
         v_inf[v_inf > 80] = np.nan  # upped from 60 to 80 to reduce NaNs
         t = self.ts_arrive.to_datetime()
 
-        plt.figure(figsize=(6, 6), dpi=300)
+        plt.figure(figsize=(10, 10), dpi=300)
 
         CS = plt.contour(t, self.tofs, c3.T, levels=10, colors="blue", linewidths=0.5)
         plt.clabel(CS, CS.levels, inline=True)
 
-        # CS = plt.contour(t, self.tofs, v_inf.T, levels=10, colors="red", linewidths=0.5)
-        # plt.clabel(CS, CS.levels, inline=True)
+        CS = plt.contour(t, self.tofs, v_inf.T, levels=10, colors="red", linewidths=0.5)
+        plt.clabel(CS, CS.levels, inline=True)
 
         # Dummy points for labels
         plt.plot(t[0], self.tofs[0], lw=0.5, color="b", label="C3 (km2/s2)")
-        # plt.plot(t[0], self.tofs[0], lw=0.5, color="r", label="v_inf (km/s)")
+        plt.plot(t[0], self.tofs[0], lw=0.5, color="r", label="v_inf (km/s)")
 
         plt.legend(loc=4)
         plt.title(f"{self.origin} - {self.target}")
@@ -327,7 +327,7 @@ def analyze_comet(origin: str, name: str, epoch: Time, elements: dict = None):
 
 
 if __name__ == "__main__":
-    # # analyze_lagrange_points()
+    # analyze_lagrange_points()
 
     # elements = {
     #     "a": 10474.06 * u.au,  # Semi-major axis
@@ -395,7 +395,7 @@ if __name__ == "__main__":
     #     "ecc": 0.9998956528860143 * u.one,  # Eccentricity
     #     "inc": 100.88290133343503 * u.deg,  # Inclination
     #     "raan": 232.4318366430011 * u.deg,  # Right ascension of ascending node
-    #     "argp": 335.5337773673682 * u.deg,  # Argument of periapsis
+    #     "argp": 35.5337773673682 * u.deg,  # Argument of periapsis
     #     "nu": 0 * u.deg,  # True anomaly, 0 because epoch at perihelion
     # }
     # epoch = Time("2033-06-15T12:00:00", format="isot", scale="utc")
